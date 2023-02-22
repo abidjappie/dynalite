@@ -10,7 +10,7 @@
   var errors = Object.create(null)
   var nestedPaths = Object.create(null)
   var pathHeads = Object.create(null)
-
+    
   function checkReserved(name) {
     if (isReserved(name) && !errors.reserved) {
       errors.reserved = 'Attribute name is a reserved keyword; reserved keyword: ' + name
@@ -217,180 +217,196 @@
     }
     return null
   }
+    
+	// Precedence
+	let symbols = {
+        'AND': {
+        	prec: 0
+        },
+        'OR': {
+        	prec: 1
+        },
+        'IN' : {
+        	prec: 1
+        },
+        'BETWEEN': {
+        	prec: 1
+        },
+        '<': {
+        	prec: 2
+        },
+        '>': {
+        	prec: 2
+        },
+        '=': {
+        	prec: 2
+		    },
+        '<>': {
+        	prec: 2
+        },
+        '<=': {
+        	prec: 2
+        },
+        '>=': {
+        	prec: 2
+        }
+    };
+
+    function Identifier(a) {
+    	return a.toUpperCase()
+    }
+    
+    function Call(a, b) {
+      // Validate Args
+      let args = b
+      
+      if (a.toUpperCase() === 'BETWEEN')
+      	checkBetweenArgs(args[0], args[1])
+        
+       // Hack
+       if (Array.isArray(b[1][0]) && Array.isArray(b[1][1])) {
+       	args = [b[0], ...b[1]]
+       }
+        
+     return {
+        type: a.toLowerCase(),
+        args
+      }
+    }
+
+	function ResolveAttributes(a) {
+    if (attrNames[a]) {
+      delete unusedAttrNames[a]
+      return attrNames[a]
+    }
+
+    if (attrVals[a]) {
+      delete unusedAttrVals[a]
+      return attrVals[a]
+    }
+
+    return a
+    }
+    
+    function ShuntingYard(a, b) {
+     	if (b.length === 0) {
+   		return a
+    }
+  
+    const stack = [[a, b[0][0]]];
+    let top = b[0][1];
+    for (let i=1, ilen = b.length; i<ilen; ++i) {
+    	const [o1, n] = b[i];
+        
+        for (let j=stack.length - 1; j>=0; --j) {
+         const [v1, o2] = stack[j];
+         
+         const pd = symbols[o2.toUpperCase()].prec - symbols[o1.toUpperCase()].prec;
+         if (pd > 0 || pd === 0) {
+         	stack.pop()
+            top = Call(Identifier(o2), [v1, top]);
+         } else {
+         	break;
+           }
+        }
+        
+        stack.push([top, o1]);
+        top = n;
+    }
+    
+    for (let j=stack.length -1; j>= 0; --j) {
+    	const [v1, o2] = stack[j];
+        top = Call(Identifier(o2), [v1, top]);
+    }
+    return top;
+    }
 }
 
-// XXX: We should really refactor this to just construct the expression tree first,
-//      and then traverse to check errors afterwards
-
-Start
-  = _ expr:OrConditionExpression _ {
-      checkMisusedSize(expr)
+Start = expr:NotExpression {
       return checkErrors() || {expression: expr, nestedPaths: nestedPaths, pathHeads: pathHeads}
-    }
+}
 
-OrConditionExpression
-  = x:AndConditionExpression _ token:OrToken _ y:OrConditionExpression {
-      [x, y].forEach(checkMisusedSize)
-      return {type: 'or', args: [x, y]}
+NotExpression
+ = 'NOT'i _ a:Expression {
+	return {
+    	type: 'not',
+        args: [a]
     }
-  / expr:AndConditionExpression
+} / Expression
 
-AndConditionExpression
-  = x:NotConditionExpression _ AndToken _ y:AndConditionExpression {
-      [x, y].forEach(checkMisusedSize)
-      return {type: 'and', args: [x, y]}
-    }
-  / NotConditionExpression
+Expression
+  = _ a:Token b:(@Symbol _ @Token _)* {
+  	return ShuntingYard(a,b)
+  }
 
-NotConditionExpression
-  = token:NotToken _ expr:ParensConditionExpression {
-      checkMisusedSize(expr)
-      return {type: 'not', args: [expr]}
-    }
-  / ParensConditionExpression
-
-ParensConditionExpression
-  = '(' _ '(' _ expr:OrConditionExpression _ ')' _ ')' {
-      redundantParensError()
-      return expr
-    }
-  / '(' _ '(' _ expr:ConditionExpression _ ')' _ ')' {
-      redundantParensError()
-      checkConditionErrors()
-      return expr
-    }
-  / expr:ConditionExpression {
-      checkConditionErrors()
-      return expr
-    }
-  / '(' _ expr:OrConditionExpression _ ')' {
-      return expr
-    }
-
-ConditionExpression
-  = x:OperandParens _ comp:Comparator _ y:OperandParens {
-      checkMisusedFunction([x, y])
-      checkDistinct(comp, [x, y])
-      return {type: comp, args: [x, y]}
-    }
-  / x:OperandParens _ BetweenToken _ y:OperandParens _ AndToken _ z:OperandParens {
-      checkMisusedFunction([x, y, z])
-      checkBetweenArgs(y, z)
-      return {type: 'between', args: [x, y, z]}
-    }
-  / x:OperandParens _ token:InToken _ '(' _ args:FunctionArgumentList _ ')' {
-      checkMisusedFunction([x].concat(args))
-      return {type: 'in', args: [x].concat(args)}
-    }
-  / f:Function
-
-Comparator
-  = '>=' / '<=' / '<>' / '=' / '<' / '>'
-
-OperandParens
-  = '(' _ '(' _ op:Operand _ ')' _ ')' {
-      redundantParensError()
-      return op
-    }
-  / '(' _ op:Operand _ ')' {
-      return op
-    }
-  / Operand
-
-Operand
+Token
   = Function
-  / ExpressionAttributeValue
-  / path:PathExpression {
-      for (var i = 0; i < path.length; i++) {
-        if (typeof path[i] === 'string') {
-          checkReserved(path[i])
-        } else if (path[i] && path[i].type == 'attrName') {
-          path[i] = resolveAttrName(path[i].name)
-        }
-      }
-      if (path.length > 1) {
-        nestedPaths[path[0]] = true
-      }
-      pathHeads[path[0]] = true
-      return path
-    }
+  / Group
+  / Braced
+
+Identity
+  = a:$[A-Za-z_0-9:#]+ _ {
+  	const resolved = ResolveAttributes(a)
+    // This might be wrong
+  	pathHeads[resolved] = true
+  	return resolved
+  }
+
+Group
+ = '(' a:Path b:(',' _ @Path)+ ')' _ {
+ 	return [a,...b]
+ }
+ / a:Path {
+ 	return a
+ }
 
 Function
-  = !ReservedWord head:IdentifierStart tail:IdentifierPart* _ '(' _ args:FunctionArgumentList _ ')' {
-      checkMisusedFunction(args)
-      var name = head + tail.join('')
-      var attrType = checkFunction(name, args)
-      return {type: 'function', name: name, args: args, attrType: attrType}
+  = name:FunctionNames "(" _ args:Args ")" _ {
+
+    const attrType = checkFunction(name, args)
+
+    return {
+    	type: 'function',
+        name,
+        args,
+        attrType
     }
+   }
+  
+FunctionNames
+  = @( 'attribute_exists'i
+  / 'attribute_not_exists'i
+  / 'attribute_type'i
+  / 'begins_with'i
+  / 'contains'i
+  / 'size'i ) _
 
-FunctionArgumentList
-  = head:OperandParens tail:(_ ',' _ expr:OperandParens { return expr })* {
-      return [head].concat(tail)
-    }
+Args
+ = a:Path b:(','_ @Path )+ {
+ 	return [a, ...b]
+ }
+ / a:Path {
+ 	return [a]
+ }
 
-ExpressionAttributeName
-  = !ReservedWord head:'#' tail:IdentifierPart* {
-      return {type: 'attrName', name: head + tail.join('')}
-    }
+Path
+ = a:(@Identity) _ b:('.' @Identity _)+ {
+ 	nestedPaths[a] = true
+ 	return [a, ...b]
+ }
+ / a:Identity {
+ 	return [a]
+ }
 
-ExpressionAttributeValue
-  = !ReservedWord head:':' tail:IdentifierPart* {
-      return resolveAttrVal(head + tail.join(''))
-    }
+Braced
+  = "(" _ "(" _ expr:NotExpression ")" _ ")" _ {
+    redundantParensError()
+    return expr
+  }
+  / "(" _ @NotExpression ")" _
 
-PathExpression
-  = head:GroupedPathExpression tail:(
-      _ '[' _ ix:[0-9]+ _ ']' {
-        return +(ix.join(''))
-      }
-    / _ '.' _ prop:Identifier {
-        return prop
-      }
-    )* {
-      return (Array.isArray(head) ? head : [head]).concat(tail)
-    }
+Symbol
+  = 'AND'i /  'OR'i  / 'IN'i / 'BETWEEN'i  / '=' / '<>' / '>' / '<' / '>=' / '<='
 
-GroupedPathExpression
-  = Identifier
-  / '(' _ '(' _ path:PathExpression _ ')' _ ')' {
-      redundantParensError()
-      return path
-    }
-  / '(' _ path:PathExpression _ ')' {
-      return path
-    }
-
-Identifier
-  = !ReservedWord head:IdentifierStart tail:IdentifierPart* {
-      return head + tail.join('')
-    }
-  / ExpressionAttributeName
-
-IdentifierStart
-  = [a-zA-Z]
-  / '_'
-
-IdentifierPart
-  = IdentifierStart
-  / [0-9]
-
-AttributePart
-  = IdentifierPart
-  / '#'
-  / ':'
-
-ReservedWord
-  = BetweenToken
-  / InToken
-  / AndToken
-  / OrToken
-  / NotToken
-
-BetweenToken = 'BETWEEN'i !AttributePart
-InToken = 'IN'i !AttributePart
-AndToken = 'AND'i !AttributePart
-OrToken = 'OR'i !AttributePart
-NotToken = 'NOT'i !AttributePart
-
-_ 'whitespace'
-  = [ \t\r\n]*
+ _ 'whitespace'
+ 	= [ /n/t/r]*
